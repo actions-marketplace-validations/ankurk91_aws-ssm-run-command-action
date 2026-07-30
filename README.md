@@ -1,6 +1,5 @@
 # AWS SSM Run Command Action
 
-[![tests](https://github.com/ankurk91/aws-ssm-run-command-action/actions/workflows/tests.yaml/badge.svg)](https://github.com/ankurk91/aws-ssm-run-command-action/actions)
 [![localstack](https://github.com/ankurk91/aws-ssm-run-command-action/actions/workflows/localstack.yaml/badge.svg)](https://github.com/ankurk91/aws-ssm-run-command-action/actions)
 
 A GitHub Action to execute remote shell commands on EC2 instances via SSM.
@@ -59,7 +58,7 @@ jobs:
 
     steps:
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -70,7 +69,7 @@ jobs:
         with:
           ec2_instance_id: ${{ vars.EC2_INSTANCE_ID }}
           run_as_user: ubuntu
-          log_bucket: ${{ vars.LOG_BUCKET_NAME }}
+          log_bucket_name: ${{ vars.LOG_BUCKET_NAME }}
           commands: |
             set -e
             pwd

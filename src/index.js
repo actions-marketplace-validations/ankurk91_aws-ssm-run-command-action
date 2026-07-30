@@ -5,11 +5,16 @@ import {
   GetCommandInvocationCommand
 } from '@aws-sdk/client-ssm'
 import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3'
-import process from 'node:process';
-import { text } from 'stream/consumers';
+import { text } from 'node:stream/consumers';
+import process  from 'node:process';
 
 const ssm = new SSMClient()
-const s3 = new S3Client()
+// LocalStack only resolves path-style S3 URLs; virtual-hosted-style requests
+// (bucket.localhost) fail with NoSuchBucket. Enable path-style only when a
+// custom endpoint is set so real AWS keeps using the default addressing.
+const s3 = new S3Client({
+  forcePathStyle: Boolean(process.env.AWS_ENDPOINT_URL)
+})
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
@@ -25,7 +30,12 @@ async function fetchS3(bucket, key) {
     }))
     return await streamToString(res.Body)
   } catch (error) {
-    core.debug(`Unable to fetch from s3://${bucket}/${key}`)
+    const statusCode = error?.$metadata?.httpStatusCode
+    if (error?.name === 'AccessDenied' || statusCode === 403) {
+      throw new Error(`Access denied reading s3://${bucket}/${key}. Check the EC2 instance and pipeline IAM permissions on the log bucket.`)
+    }
+    // NoSuchKey / missing object is expected (e.g. no stderr produced)
+    core.debug(`Unable to fetch from s3://${bucket}/${key}: ${error?.name ?? error}`)
     return null
   }
 }
@@ -33,13 +43,20 @@ async function fetchS3(bucket, key) {
 async function run() {
   const EC2_INSTANCE_ID = core.getInput('ec2_instance_id', {required: true})
   const RUN_AS_USER = core.getInput('run_as_user', {required: true})
+
+  if (!/^[A-Za-z0-9_-]+$/.test(RUN_AS_USER)) {
+    throw new Error(`Invalid run_as_user "${RUN_AS_USER}". Only letters, digits, underscores and hyphens are allowed.`)
+  }
+
   const COMMANDS = core.getInput('commands', {required: true})
   const LOG_BUCKET_NAME = core.getInput('log_bucket_name', {required: true})
-  const S3_PREFIX = core.getInput('s3_prefix')
+  const S3_PREFIX = core.getInput('s3_prefix') || 'deployments'
   const COMMENT = core.getInput('comment')
-  const EXECUTION_TIMEOUT = String(core.getInput('execution_timeout'))
-  const POLL_INTERVAL_MS = parseInt(core.getInput('poll_interval_ms'))
+  const EXECUTION_TIMEOUT = core.getInput('execution_timeout') || '3600'
+  const POLL_INTERVAL_MS = parseInt(core.getInput('poll_interval_ms'), 10) || 2000
 
+  // `exec 2>&1` merges stderr into stdout so interleaved output stays in
+  // chronological order; on separate streams the lines can arrive out of sequence.
   const SCRIPT = `
 set -e
 sudo -u ${RUN_AS_USER} bash <<'INNER'
@@ -82,22 +99,17 @@ INNER
 
   const base = `${S3_PREFIX}/${COMMAND_ID}/${EC2_INSTANCE_ID}/awsrunShellScript/0.awsrunShellScript`
 
-  core.startGroup('Remote stdout')
   const stdout = await fetchS3(LOG_BUCKET_NAME, `${base}/stdout`)
   stdout ? core.info(stdout) : core.warning('No stdout found')
-  core.endGroup()
 
-  core.startGroup('Remote stderr')
   const stderr = await fetchS3(LOG_BUCKET_NAME, `${base}/stderr`)
   stderr && core.warning(stderr)
-  core.endGroup()
 
   core.setOutput('command-exit-code', EXIT_CODE);
   core.info(`Exit code: ${EXIT_CODE}`)
 
   if (String(EXIT_CODE) !== '0') {
-    core.error(`Remote command failed with exit code: ${EXIT_CODE}`)
-    process.exit(EXIT_CODE)
+    core.setFailed(`Remote command failed with exit code: ${EXIT_CODE}`)
   }
 }
 

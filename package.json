@@ -2,7 +2,7 @@
   "name": "aws-ssm-run-command-action",
   "main": "dist/index.js",
   "type": "module",
-  "private": "true",
+  "private": true,
   "keywords": [
     "aws",
     "ssm"
@@ -20,15 +20,15 @@
     "build:cancel": "ncc build ./src/cancel.js -o dist/cancel"
   },
   "dependencies": {
-    "@actions/core": "^1.11.1",
-    "@aws-sdk/client-s3": "^3.958.0",
-    "@aws-sdk/client-ssm": "^3.901.0"
+    "@actions/core": "^3.0.1",
+    "@aws-sdk/client-s3": "^3.1053.0",
+    "@aws-sdk/client-ssm": "^3.1053.0"
   },
   "devDependencies": {
     "@vercel/ncc": "^0.38.4"
   },
   "engineStrict": true,
-  "packageManager": "pnpm@10.17.0",
+  "packageManager": "pnpm@11.5.0",
   "engines": {
     "node": ">=24.11.0"
   }
