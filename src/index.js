@@ -4,41 +4,9 @@ import {
   SendCommandCommand,
   GetCommandInvocationCommand
 } from '@aws-sdk/client-ssm'
-import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3'
-import { text } from 'node:stream/consumers';
-import process  from 'node:process';
+import {sleep, printUntrusted, fetchS3, buildRemoteScript} from './utils.js'
 
 const ssm = new SSMClient()
-// LocalStack only resolves path-style S3 URLs; virtual-hosted-style requests
-// (bucket.localhost) fail with NoSuchBucket. Enable path-style only when a
-// custom endpoint is set so real AWS keeps using the default addressing.
-const s3 = new S3Client({
-  forcePathStyle: Boolean(process.env.AWS_ENDPOINT_URL)
-})
-
-const sleep = ms => new Promise(r => setTimeout(r, ms))
-
-async function streamToString(stream) {
-  return await text(stream);
-}
-
-async function fetchS3(bucket, key) {
-  try {
-    const res = await s3.send(new GetObjectCommand({
-      Bucket: bucket,
-      Key: key
-    }))
-    return await streamToString(res.Body)
-  } catch (error) {
-    const statusCode = error?.$metadata?.httpStatusCode
-    if (error?.name === 'AccessDenied' || statusCode === 403) {
-      throw new Error(`Access denied reading s3://${bucket}/${key}. Check the EC2 instance and pipeline IAM permissions on the log bucket.`)
-    }
-    // NoSuchKey / missing object is expected (e.g. no stderr produced)
-    core.debug(`Unable to fetch from s3://${bucket}/${key}: ${error?.name ?? error}`)
-    return null
-  }
-}
 
 async function run() {
   const EC2_INSTANCE_ID = core.getInput('ec2_instance_id', {required: true})
@@ -55,19 +23,12 @@ async function run() {
   const EXECUTION_TIMEOUT = core.getInput('execution_timeout') || '3600'
   const POLL_INTERVAL_MS = parseInt(core.getInput('poll_interval_ms'), 10) || 2000
 
-  // `exec 2>&1` merges stderr into stdout so interleaved output stays in
-  // chronological order; on separate streams the lines can arrive out of sequence.
-  const SCRIPT = `
-set -e
-sudo -u ${RUN_AS_USER} bash <<'INNER'
-exec 2>&1
-${COMMANDS}
-INNER
-`
+  const SCRIPT = buildRemoteScript(RUN_AS_USER, COMMANDS)
+
   core.info('Sending command to remote server...')
   const sendResp = await ssm.send(new SendCommandCommand({
     InstanceIds: [EC2_INSTANCE_ID],
-    TimeoutSeconds: 300, // SSM will wait up to these seconds for the agent to pick up the command
+    TimeoutSeconds: 300, // how long SSM waits for the agent to pick the command up
     Comment: COMMENT,
     DocumentName: 'AWS-RunShellScript',
     Parameters: {
@@ -84,7 +45,9 @@ INNER
   core.info('Waiting for command to finish...')
 
   let STATUS = 'Pending'
-  let EXIT_CODE = 255;
+  let STATUS_DETAILS = ''
+  // Null until the script runs to completion, so it must not be flattened into a number early.
+  let RESPONSE_CODE = null
   while (['Pending', 'InProgress', 'Delayed'].includes(STATUS)) {
     await sleep(POLL_INTERVAL_MS)
     const resp = await ssm.send(new GetCommandInvocationCommand({
@@ -93,23 +56,44 @@ INNER
       PluginName: 'aws:runShellScript'
     }))
     STATUS = resp.Status ?? 'Unknown'
-    EXIT_CODE = resp.ResponseCode ?? 255
+    STATUS_DETAILS = resp.StatusDetails ?? ''
+    RESPONSE_CODE = resp.ResponseCode ?? null
     core.info(`Command status: ${STATUS}`)
   }
+
+  const EXIT_CODE = RESPONSE_CODE ?? 255
+
+  // Set before the S3 fetches: a failure reading logs must not cancel a finished command.
+  core.saveState('ssm-command-done', 'true')
 
   const base = `${S3_PREFIX}/${COMMAND_ID}/${EC2_INSTANCE_ID}/awsrunShellScript/0.awsrunShellScript`
 
   const stdout = await fetchS3(LOG_BUCKET_NAME, `${base}/stdout`)
-  stdout ? core.info(stdout) : core.warning('No stdout found')
+  if (stdout) {
+    printUntrusted('Remote stdout', stdout)
+  } else {
+    core.warning('No stdout found')
+  }
 
   const stderr = await fetchS3(LOG_BUCKET_NAME, `${base}/stderr`)
-  stderr && core.warning(stderr)
+  if (stderr) {
+    // An annotation only renders outside the fence, so it carries a fixed message and the
+    // remote text goes to the log group instead.
+    core.warning('Remote command wrote to stderr, see the "Remote stderr" log group')
+    printUntrusted('Remote stderr', stderr)
+  }
 
   core.setOutput('command-exit-code', EXIT_CODE);
+  core.setOutput('command-status', STATUS);
+  core.info(`Status: ${STATUS}${STATUS_DETAILS && STATUS_DETAILS !== STATUS ? ` (${STATUS_DETAILS})` : ''}`)
   core.info(`Exit code: ${EXIT_CODE}`)
 
-  if (String(EXIT_CODE) !== '0') {
-    core.setFailed(`Remote command failed with exit code: ${EXIT_CODE}`)
+  // Status is authoritative: a null ResponseCode reports as the 255 sentinel, which is
+  // indistinguishable from a script that genuinely exited 255 — so only quote a real one.
+  if (STATUS !== 'Success') {
+    const code = RESPONSE_CODE === null ? '' : ` (exit code ${RESPONSE_CODE})`
+    const detail = STATUS_DETAILS && STATUS_DETAILS !== STATUS ? `: ${STATUS_DETAILS}` : ''
+    core.setFailed(`Remote command ${STATUS}${code}${detail}`)
   }
 }
 

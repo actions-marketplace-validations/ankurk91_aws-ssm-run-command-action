@@ -1,6 +1,10 @@
 # AWS SSM Run Command Action
 
-[![localstack](https://github.com/ankurk91/aws-ssm-run-command-action/actions/workflows/localstack.yaml/badge.svg)](https://github.com/ankurk91/aws-ssm-run-command-action/actions)
+<p align="center">
+  <img src=".github/banner.jpg" alt="AWS SSM Run Command Action" width="100%">
+</p>
+
+[![moto](https://github.com/ankurk91/aws-ssm-run-command-action/actions/workflows/moto.yaml/badge.svg)](https://github.com/ankurk91/aws-ssm-run-command-action/actions)
 
 A GitHub Action to execute remote shell commands on EC2 instances via SSM.
 
@@ -94,16 +98,22 @@ jobs:
 
 ### Outputs
 
-| Name                | Description              |
-|---------------------|--------------------------|
-| `command-exit-code` | Remote command exit code |
+| Name                | Description                                                              |
+|---------------------|--------------------------------------------------------------------------|
+| `command-exit-code` | Remote command exit code, or `255` when the script never ran (see below) |
+| `command-status`    | SSM invocation status, e.g. `Success`, `Failed`, `TimedOut`, `Cancelled` |
+
+The step fails whenever `command-status` is not `Success`. Prefer it over the exit code when
+branching on the outcome: SSM reports no exit code at all if the script never ran — an unreachable
+instance, a missing SSM agent, a timeout or a cancellation — and `command-exit-code` falls back to
+`255` in those cases, which is indistinguishable from a script that genuinely exited `255`.
 
 ### Credentials and Region
 
 This action relies on the default behavior of the
 [AWS SDK for Javascript](https://docs.aws.amazon.com//sdk-for-javascript/v3/developer-guide/setting-credentials-node.html)
-to determine AWS credentials and region.
-Use the [aws-actions/configure-aws-credentials](https://github.com/aws-actions/configure-aws-credentials) action to
+to determine AWS credentials and region. Use
+the [aws-actions/configure-aws-credentials](https://github.com/aws-actions/configure-aws-credentials) action to
 configure the GitHub Actions environment with environment variables containing AWS credentials and your desired region.
 
 ### Action Permissions
@@ -127,14 +137,34 @@ This action requires the following set of permissions inside pipeline:
     {
       "Effect": "Allow",
       "Action": [
-        "ssm:ListCommandInvocations",
-        "ssm:GetCommandInvocation"
+        "ssm:GetCommandInvocation",
+        "ssm:CancelCommand"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::project-name-ssm-deployment-logs/*"
     }
   ]
 }
 ```
+
+Notes:
+
+* `s3:GetObject` on the log bucket is mandatory. The action reads the command output from S3 on the runner, so
+  without it every run fails with an access denied error instead of printing logs.
+* `ssm:CancelCommand` is used by the post step to stop the remote command whenever the job stops while the command is
+  still in flight — a canceled workflow, a job `timeout-minutes`, a runner shutdown or a failed step. Without it, the
+  cancellation is only logged as a warning and the remote script keeps running on the instance until it finishes or
+  hits `execution_timeout`.
+* The `arn:aws:ec2:*:*:instance/*` resource above is the permissive default. It lets any workflow holding these
+  credentials run arbitrary commands as root on **every** instance in the account. Narrowing it is strongly
+  recommended, either to the exact instance ARNs you deploy to, or via an `ssm:resourceTag/*` condition if the
+  instance IDs change over time.
 
 ### Reference links
 
@@ -144,4 +174,4 @@ This action requires the following set of permissions inside pipeline:
 
 ### License
 
-This repo is licensed under MIT [License](LICENSE.txt).
+MIT [License](LICENSE.txt).

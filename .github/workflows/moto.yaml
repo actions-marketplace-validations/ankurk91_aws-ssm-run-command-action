@@ -1,0 +1,56 @@
+name: moto-test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 18 * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  moto:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    services:
+      moto:
+        image: motoserver/moto:5.2.3
+        ports:
+          # moto serves on 5000; published as 4566 so AWS_ENDPOINT_URL stays what it always was.
+          - 4566:5000
+        options: >-
+          --health-cmd="curl -f http://localhost:5000/moto-api/ || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm and node.js
+        uses: pnpm/setup@v3.0.0
+        with:
+          runtime: node@24
+          cache: true
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test the action
+        run: bash ./moto.sh
